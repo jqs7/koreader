@@ -654,7 +654,7 @@ function ReaderLink:getLinkFromGes(ges)
             from_xpointer = a_xpointer
         end
 
-        if link_xpointer ~= "" then
+        if link_xpointer and link_xpointer ~= "" then
             -- This link's source xpointer is more precise than a classic
             -- xpointer to top of a page: we can show a marker at its
             -- y-position in target page
@@ -855,7 +855,7 @@ function ReaderLink:onGotoLink(link, neglect_current_location, allow_footnote_po
         -- If the XPointer does not exist (or is a full url), we will jump to page 1
         -- Best to check that this link exists in document with the following,
         -- which accepts both of the above legitimate xpointer as input.
-        if self.document:isXPointerInDocument(link.xpointer) then
+        if link.xpointer and self.document:isXPointerInDocument(link.xpointer) then
             logger.dbg("ReaderLink:onGotoLink: Internal link:", link)
             if allow_footnote_popup then
                 if self:showAsFootnotePopup(link, neglect_current_location) then
