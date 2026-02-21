@@ -309,6 +309,36 @@ function FootnoteWidget:init()
     local padding_bottom = Size.padding.large
     local htmlwidget_height = self.height - padding_top - padding_bottom
 
+    -- Set up user fallback fonts so MuPDF can render characters not in the
+    -- primary font (e.g. CJK, Arabic, Devanagari) using the same fallback
+    -- chain the user configured for crengine.
+    -- Wrapped in pcall: the C symbols may not exist if MuPDF was built
+    -- without the user-fallback-fonts patch.
+    pcall(function()
+        local CreDocument = require("document/credocument")
+        local cre = CreDocument:engineInit()
+        local fallback_paths = {}
+        local seen_paths = {}
+        local fallback_names = {}
+        local user_fb = G_reader_settings:readSetting("fallback_font")
+        if user_fb then
+            table.insert(fallback_names, user_fb)
+        end
+        for _, name in ipairs(CreDocument.fallback_fonts) do
+            table.insert(fallback_names, name)
+        end
+        for _, name in ipairs(fallback_names) do
+            local path = cre.getFontFaceFilenameAndFaceIndex(name)
+            if path and not seen_paths[path] then
+                seen_paths[path] = true
+                table.insert(fallback_paths, path)
+            end
+        end
+        if #fallback_paths > 0 then
+            require("ffi/mupdf").setUserFallbackFonts(fallback_paths)
+        end
+    end)
+
     -- We always get balanced XHTML from crengine for HTML snippets, so we
     -- pass is_xhtml=true to avoid side effects from MuPDF's HTML5 parser.
     self.htmlwidget = ScrollHtmlWidget:new{
