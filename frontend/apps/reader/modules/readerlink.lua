@@ -1572,33 +1572,39 @@ function ReaderLink:showAsFootnotePopup(link, neglect_current_location)
     -- don't have a fixed size)
     local FootnoteWidget = require("ui/widget/footnotewidget")
     local popup
-    popup = FootnoteWidget:new{
-        html = html,
-        doc_font_name = self.ui.font.font_face,
-        doc_font_size = Screen:scaleBySize(self.document.configurable.font_size),
-        doc_margins = self.document:getPageMargins(),
-        close_callback = close_callback,
-        follow_callback = function() -- follow the link on swipe west
-            UIManager:close(popup)
-            self:onGotoLink(link, neglect_current_location)
-        end,
-        on_tap_close_callback = function(arg, ges, footnote_height)
-            self._footnote_popup_discard_previous_close_callback = nil
-            -- On tap outside, see if we are tapping on another footnote,
-            -- and display it if we do (avoid the need for 2 taps)
-            self:onTap(arg, ges)
-            -- If onTap() did show another FootnoteWidget, and it
-            -- has already cleared our highlight, avoid calling our
-            -- close_callback so we do not clear the new highlight
-            if not self._footnote_popup_discard_previous_close_callback then
-                if close_callback then -- not set if xpointer not coherent
-                    close_callback(footnote_height)
+    local ok, err = pcall(function()
+        popup = FootnoteWidget:new{
+            html = html,
+            doc_font_name = self.ui.font.font_face,
+            doc_font_size = Screen:scaleBySize(self.document.configurable.font_size),
+            doc_margins = self.document:getPageMargins(),
+            close_callback = close_callback,
+            follow_callback = function() -- follow the link on swipe west
+                UIManager:close(popup)
+                self:onGotoLink(link, neglect_current_location)
+            end,
+            on_tap_close_callback = function(arg, ges, footnote_height)
+                self._footnote_popup_discard_previous_close_callback = nil
+                -- On tap outside, see if we are tapping on another footnote,
+                -- and display it if we do (avoid the need for 2 taps)
+                self:onTap(arg, ges)
+                -- If onTap() did show another FootnoteWidget, and it
+                -- has already cleared our highlight, avoid calling our
+                -- close_callback so we do not clear the new highlight
+                if not self._footnote_popup_discard_previous_close_callback then
+                    if close_callback then -- not set if xpointer not coherent
+                        close_callback(footnote_height)
+                    end
                 end
-            end
-            self._footnote_popup_discard_previous_close_callback = nil
-        end,
-        dialog = self.dialog,
-    }
+                self._footnote_popup_discard_previous_close_callback = nil
+            end,
+            dialog = self.dialog,
+        }
+    end)
+    if not ok then
+        logger.warn("FootnoteWidget init error:", err)
+        return false
+    end
     UIManager:show(popup)
     return true
 end

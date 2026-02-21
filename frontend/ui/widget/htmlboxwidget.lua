@@ -257,7 +257,9 @@ function HtmlBoxWidget:setContent(body, css, default_font_size, is_xhtml, no_css
 
         ok, self.document = pcall(Mupdf.openDocumentFromText, html, "html", html_resource_directory)
         if not ok then
-            error(self.document)
+            logger.warn("HTML fallback loading error:", self.document)
+            html = "<html><body><p>[HTML rendering failed]</p></body></html>"
+            self.document = Mupdf.openDocumentFromText(html, "html")
         end
     end
 
