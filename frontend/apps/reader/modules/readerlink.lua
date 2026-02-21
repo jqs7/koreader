@@ -67,6 +67,8 @@ local ReaderLink = InputContainer:extend{
     forward_location_stack = nil, -- table, per-instance
     _external_link_buttons = nil,
     supported_external_schemes = nil,
+    _footnote_cache = nil, -- table, per-instance, LRU cache for footnote detection + HTML
+    _footnote_cache_order = nil, -- table, per-instance, tracks insertion order for eviction
 }
 
 function ReaderLink:init()
@@ -1365,6 +1367,10 @@ function ReaderLink:onPosUpdate()
     end
 end
 
+function ReaderLink:onDocumentRerendered()
+    self:_footnoteCacheClear()
+end
+
 function ReaderLink:onGoToLatestBookmark(ges)
     local latest_bookmark = self.ui.bookmark:getLatestBookmark()
     if latest_bookmark then
@@ -1484,40 +1490,39 @@ function ReaderLink:showAsFootnotePopup(link, neglect_current_location)
     flags = flags + 0x8000
     local max_text_size = 10000 -- nb of chars
 
-    logger.dbg("Checking if link is to a footnote:", flags, source_xpointer, target_xpointer)
-    local is_footnote, reason, extStopReason, extStartXP, extEndXP =
-            self.document:isLinkToFootnote(source_xpointer, target_xpointer, flags, max_text_size)
+    local cache_key = source_xpointer .. "\0" .. target_xpointer .. "\0" .. tostring(flags)
+    local cached = self._footnote_cache and self._footnote_cache[cache_key]
+    local is_footnote, html
+    if cached then
+        is_footnote = cached.is_footnote
+        html = cached.html
+        logger.dbg("Footnote cache hit for:", target_xpointer)
+    else
+        logger.dbg("Checking if link is to a footnote:", flags, source_xpointer, target_xpointer)
+        local reason, extStopReason, extStartXP, extEndXP
+        is_footnote, reason, extStopReason, extStartXP, extEndXP =
+                self.document:isLinkToFootnote(source_xpointer, target_xpointer, flags, max_text_size)
+        if is_footnote then
+            logger.dbg("is a footnote:", reason)
+            if extStartXP then
+                logger.dbg("  extended until:", extStopReason)
+                logger.dbg(extStartXP)
+                logger.dbg(extEndXP)
+            else
+                logger.dbg("  not extended because:", extStopReason)
+            end
+            if extStartXP and extEndXP then
+                html = self.document:getHTMLFromXPointers(extStartXP, extEndXP, 0x1001)
+            else
+                html = self.document:getHTMLFromXPointer(target_xpointer, 0x1001, true)
+            end
+        else
+            logger.dbg("not a footnote:", reason)
+        end
+        self:_footnoteCachePut(cache_key, { is_footnote = is_footnote, html = html })
+    end
     if not is_footnote then
-        logger.dbg("not a footnote:", reason)
         return false
-    end
-    logger.dbg("is a footnote:", reason)
-    if extStartXP then
-        logger.dbg("  extended until:", extStopReason)
-        logger.dbg(extStartXP)
-        logger.dbg(extEndXP)
-    else
-        logger.dbg("  not extended because:", extStopReason)
-    end
-    -- OK, done with the dirty footnote detection work, we can now
-    -- get back to the fancy UI stuff
-
-    -- We don't request CSS files, to have a more consistent footnote style.
-    -- (we still get and give to MuPDF styles set with style="" )
-    -- (We also don't because MuPDF is quite sensitive to bad css, and may
-    -- then just ignore the whole stylesheet, including our own declarations
-    -- we add at start)
-    --
-    -- flags = 0x1001 to get the simplest/purest HTML without CSS, with added
-    -- soft-hyphens where hyphenation is allowed (done by crengine according
-    -- to user's hyphenation settings), and dir= and lang= attributes grabbed
-    -- from parent nodes
-    local html
-    if extStartXP and extEndXP then
-        html = self.document:getHTMLFromXPointers(extStartXP, extEndXP, 0x1001)
-    else
-        html = self.document:getHTMLFromXPointer(target_xpointer, 0x1001, true)
-        -- from_final_parent = true to get a possibly more complete footnote
     end
     if not html then
         logger.info("failed getting HTML for xpointer:", target_xpointer)
@@ -1611,6 +1616,28 @@ end
 
 function ReaderLink:addToExternalLinkDialog(idx, fn_button)
     self._external_link_buttons[idx] = fn_button
+end
+
+local FOOTNOTE_CACHE_MAX = 32
+
+function ReaderLink:_footnoteCachePut(key, value)
+    if not self._footnote_cache then
+        self._footnote_cache = {}
+        self._footnote_cache_order = {}
+    end
+    if not self._footnote_cache[key] then
+        if #self._footnote_cache_order >= FOOTNOTE_CACHE_MAX then
+            local oldest = table.remove(self._footnote_cache_order, 1)
+            self._footnote_cache[oldest] = nil
+        end
+        table.insert(self._footnote_cache_order, key)
+    end
+    self._footnote_cache[key] = value
+end
+
+function ReaderLink:_footnoteCacheClear()
+    self._footnote_cache = nil
+    self._footnote_cache_order = nil
 end
 
 function ReaderLink:removeFromExternalLinkDialog(idx)
