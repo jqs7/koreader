@@ -294,6 +294,23 @@ function FootnoteWidget:init()
     -- So, just rename the id= attribute, as we don't follow links in this popup.
     self.html = self.html:gsub([[(<[^>]* )[iI][dD]=]], [[%1disabledID=]])
 
+    -- Strip trailing elements that produce no visible content to avoid
+    -- a blank last page. HtmlBoxWidget converts <br/> to "&nbsp;<div></div>",
+    -- and that trailing &nbsp; is real content that forces MuPDF to paginate
+    -- an extra blank page.
+    local prev
+    repeat
+        prev = self.html
+        self.html = self.html:gsub("%s*<br/>%s*$", "")
+        self.html = self.html:gsub("%s*<p>%s*</p>%s*$", "")
+        self.html = self.html:gsub("%s*<p>%s*&nbsp;%s*</p>%s*$", "")
+        self.html = self.html:gsub("%s*<div>%s*</div>%s*$", "")
+        self.html = self.html:gsub("%s*<div>%s*&nbsp;%s*</div>%s*$", "")
+        self.html = self.html:gsub("%s*<empty%-line ?/?>%s*$", "")
+        self.html = self.html:gsub("%s*<hr ?/?>%s*$", "")
+        self.html = self.html:gsub("(&nbsp;%s*)+$", "")
+    until self.html == prev
+
     -- We may use a font size a bit smaller than the document one (because
     -- footnotes are usually smaller, and because NotoSans is a bit on the
     -- larger size when compared to other fonts at the same size)
@@ -380,6 +397,38 @@ function FootnoteWidget:init()
         dialog = self.dialog,
         highlight_text_selection = true,
     }
+
+    -- Post-layout safety net: drop a blank trailing page caused by margin
+    -- overflow, trailing whitespace entities, or page-breaking artifacts.
+    -- Two-tier check: fast getUsedBBox() first; expensive getPageText()
+    -- only for the ambiguous zone (content height < ~1.5 lines).
+    local hw = self.htmlwidget.htmlbox_widget
+    if hw.page_count > 1 then
+        local last_page = hw.document:openPage(hw.page_count)
+        local _x0, _y0, _x1, y1 = last_page:getUsedBBox() -- luacheck: no unused
+        local is_blank = false
+        if y1 < 1 then
+            is_blank = true
+        elseif y1 < font_size * 2 then
+            local page_text = last_page:getPageText()
+            is_blank = true
+            for _, line in ipairs(page_text) do
+                for _, word in ipairs(line) do
+                    if type(word) == "table" and word.word and word.word ~= "" then
+                        is_blank = false
+                        break
+                    end
+                end
+                if not is_blank then break end
+            end
+        end
+        last_page:close()
+        if is_blank then
+            hw.page_count = hw.page_count - 1
+            self.htmlwidget.v_scroll_bar.enable = hw.page_count > 1
+            self.htmlwidget:_updateScrollBar()
+        end
+    end
 
     -- We only want a top border, so use a LineWidget for that
     local top_border_size = Size.line.thick
