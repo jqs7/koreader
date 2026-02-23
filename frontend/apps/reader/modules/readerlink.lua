@@ -126,13 +126,14 @@ function ReaderLink:init()
     end
     -- Pre-warm font caches and footnote detection in background after
     -- the reader is ready, so the first footnote popup opens faster.
-    if not self.ui.paging and G_reader_settings:isTrue("footnote_link_in_popup") then
-        self.ui:registerPostReaderReadyCallback(function()
-            UIManager:nextTick(function()
-                self:_warmFootnotePopupCaches()
-            end)
+    -- The actual guard (document type + setting check) is inside
+    -- _warmFootnotePopupCaches; we always register here because
+    -- settings migration (lines below) hasn't run yet at this point.
+    self.ui:registerPostReaderReadyCallback(function()
+        UIManager:nextTick(function()
+            self:_warmFootnotePopupCaches()
         end)
-    end
+    end)
     -- For relative local file links
     local directory, filename = util.splitFilePathName(self.document.file) -- luacheck: no unused
     self.document_dir = directory
