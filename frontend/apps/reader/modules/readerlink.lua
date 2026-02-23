@@ -124,6 +124,15 @@ function ReaderLink:init()
             self:addCurrentLocationToStack()
         end)
     end
+    -- Pre-warm font caches and footnote detection in background after
+    -- the reader is ready, so the first footnote popup opens faster.
+    if not self.ui.paging and G_reader_settings:isTrue("footnote_link_in_popup") then
+        self.ui:registerPostReaderReadyCallback(function()
+            UIManager:nextTick(function()
+                self:_warmFootnotePopupCaches()
+            end)
+        end)
+    end
     -- For relative local file links
     local directory, filename = util.splitFilePathName(self.document.file) -- luacheck: no unused
     self.document_dir = directory
@@ -299,6 +308,31 @@ end
 
 local function isPreferFootnoteEnabled()
     return G_reader_settings:isTrue("link_prefer_footnote")
+end
+
+local function computeFootnoteDetectionFlags(trust_source_xpointer)
+    local flags = 0
+    if isPreferFootnoteEnabled() then
+        flags = flags + 0x0001
+    end
+    if trust_source_xpointer then
+        flags = flags + 0x0002
+    end
+    flags = flags + 0x0004 -- trust role=/epub:type=
+    flags = flags + 0x0008 -- FB2 footnotes
+    flags = flags + 0x0010 -- target must have #anchor
+    if not isPreferFootnoteEnabled() then
+        flags = flags + 0x0020 -- target must come after source
+    end
+    flags = flags + 0x0040 -- target not a TOC entry
+    flags = flags + 0x0100 -- source not empty / not sole content
+    flags = flags + 0x0200 -- source vertical-align
+    flags = flags + 0x0400 -- source is numeric
+    flags = flags + 0x0800 -- source is 1-2 letters
+    flags = flags + 0x1000 -- target not in H1..H6
+    flags = flags + 0x4000 -- try to extend footnote
+    flags = flags + 0x8000 -- extended text size limit
+    return flags
 end
 
 local function isSwipeToGoBackEnabled()
@@ -649,12 +683,9 @@ function ReaderLink:getLinkFromGes(ges)
         -- On some documents, crengine may sometimes give a wrong a_xpointer
         -- (in some Wikipedia saved as EPUB, it would point to some other <A>
         -- element in the same paragraph). If followed then back, we could get
-        -- to a different page. So, we check here how valid it is, and if not,
-        -- we just discard it so that addCurrentLocationToStack() is used.
-        local from_xpointer = nil
-        if a_xpointer and self:isXpointerCoherent(a_xpointer) then
-            from_xpointer = a_xpointer
-        end
+        -- to a different page. Defer the coherence check to when it's actually
+        -- needed for back-navigation, so footnote popup path can skip it.
+        local from_xpointer = a_xpointer
 
         if link_xpointer and link_xpointer ~= "" then
             -- This link's source xpointer is more precise than a classic
@@ -666,6 +697,7 @@ function ReaderLink:getLinkFromGes(ges)
                 xpointer = link_xpointer,
                 marker_xpointer = link_xpointer,
                 from_xpointer = from_xpointer,
+                from_xpointer_unchecked = from_xpointer ~= nil,
                 a_xpointer = a_xpointer,
                 -- tap y-position should be a good approximation of link y
                 -- (needed to keep its highlight a bit more time if it was
@@ -866,6 +898,14 @@ function ReaderLink:onGotoLink(link, neglect_current_location, allow_footnote_po
                 -- if it fails for any reason, fallback to following link
             end
             if not neglect_current_location then
+                -- Deferred coherence check: validate from_xpointer before
+                -- using it for back-navigation (skipped earlier for perf)
+                if link.from_xpointer and link.from_xpointer_unchecked then
+                    if not self:isXpointerCoherent(link.from_xpointer) then
+                        link.from_xpointer = nil
+                    end
+                    link.from_xpointer_unchecked = nil
+                end
                 if link.from_xpointer then
                     -- We have a more precise xpointer than the xpointer to top of
                     -- current page that addCurrentLocationToStack() would give, and
@@ -1357,6 +1397,7 @@ function ReaderLink:onPageUpdate()
         self.cur_selected_page_link_num = nil
         self.cur_selected_link = nil
     end
+    self:_scheduleFootnoteCacheWarmup()
 end
 
 function ReaderLink:onPosUpdate()
@@ -1365,10 +1406,80 @@ function ReaderLink:onPosUpdate()
         self.cur_selected_page_link_num = nil
         self.cur_selected_link = nil
     end
+    self:_scheduleFootnoteCacheWarmup()
 end
 
 function ReaderLink:onDocumentRerendered()
     self:_footnoteCacheClear()
+    -- Font may have changed; invalidate book font CSS and re-warm.
+    local FootnoteWidget = require("ui/widget/footnotewidget")
+    FootnoteWidget.clearBookFontCssCache()
+    UIManager:nextTick(function()
+        self:_warmFootnotePopupCaches()
+    end)
+end
+
+function ReaderLink:_warmFootnotePopupCaches()
+    if self.ui.paging or not isFootnoteLinkInPopupEnabled() then
+        return
+    end
+    local FootnoteWidget = require("ui/widget/footnotewidget")
+    FootnoteWidget.warmFontCaches(self.ui.font and self.ui.font.font_face)
+    self:_warmFootnoteCacheForPage()
+end
+
+function ReaderLink:_cancelFootnoteCacheWarmup()
+    if self._footnote_warmup_action then
+        UIManager:unschedule(self._footnote_warmup_action)
+        self._footnote_warmup_action = nil
+    end
+end
+
+function ReaderLink:_scheduleFootnoteCacheWarmup()
+    if self.ui.paging or not isFootnoteLinkInPopupEnabled() then
+        return
+    end
+    self:_cancelFootnoteCacheWarmup()
+    self._footnote_warmup_action = function()
+        self._footnote_warmup_action = nil
+        self:_warmFootnoteCacheForPage()
+    end
+    -- Delay warmup to avoid interfering with rapid page turns
+    UIManager:scheduleIn(1, self._footnote_warmup_action)
+end
+
+function ReaderLink:_warmFootnoteCacheForPage()
+    if self.ui.paging then
+        return
+    end
+    local links = self.document:getPageLinks(true)
+    if not links or #links == 0 then
+        return
+    end
+    local max_text_size = 10000
+    local flags_trusted = computeFootnoteDetectionFlags(true)
+    local flags_untrusted = computeFootnoteDetectionFlags(false)
+    for _, link in ipairs(links) do
+        if link.section then
+            local source_xp = link.a_xpointer
+            local target_xp = link.section
+            local flags = source_xp and flags_trusted or flags_untrusted
+            local cache_key = (source_xp or "") .. "\0" .. target_xp .. "\0" .. tostring(flags)
+            if not (self._footnote_cache and self._footnote_cache[cache_key]) then
+                local is_footnote, _reason, _extStopReason, extStartXP, extEndXP =
+                        self.document:isLinkToFootnote(source_xp or target_xp, target_xp, flags, max_text_size)
+                local html
+                if is_footnote then
+                    if extStartXP and extEndXP then
+                        html = self.document:getHTMLFromXPointers(extStartXP, extEndXP, 0x1001)
+                    else
+                        html = self.document:getHTMLFromXPointer(target_xp, 0x1001, true)
+                    end
+                end
+                self:_footnoteCachePut(cache_key, { is_footnote = is_footnote, html = html })
+            end
+        end
+    end
 end
 
 function ReaderLink:onGoToLatestBookmark(ges)
@@ -1412,82 +1523,7 @@ function ReaderLink:showAsFootnotePopup(link, neglect_current_location)
     end
     local trust_source_xpointer = link.from_xpointer ~= nil
 
-    -- For reference, Kobo information and conditions for showing a link as popup:
-    --   https://github.com/kobolabs/epub-spec#footnotesendnotes-are-fully-supported-across-kobo-platforms
-    -- Calibre has its own heuristics to decide if a link is to a footnote or not,
-    -- and what to gather around the footnote target as the footnote content to display:
-    -- Nearly same logic, implemented in python and in coffeescript:
-    --   https://github.com/kovidgoyal/calibre/blob/master/src/pyj/read_book/footnotes.pyj
-    --   https://github.com/kovidgoyal/calibre/blob/master/src/calibre/ebooks/oeb/display/extract.coffee
-
-    -- We do many tests, including most of those done by Kobo and Calibre, to
-    -- detect if a link is to a footnote.
-    -- The detection is done in cre.cpp, because it makes use of DOM navigation and
-    -- inspection that can't be done from Lua (unless we add many proxy functions)
-
-    -- Detection flags, to allow tweaking a bit cre.cpp code if needed
-    local flags = 0
-
-    -- If no detection decided, fallback to false (not a footnote, so, follow link)
-    if isPreferFootnoteEnabled() then
-        flags = flags + 0x0001 -- if set, fallback to true
-    end
-
-    if trust_source_xpointer then
-        -- trust source_xpointer: allow checking attribute and styles
-        -- if not trusted, checks marked (*) don't apply
-        flags = flags + 0x0002
-    end
-    -- Checks for private CSS properties "-cr-hint: footnote/noteref/..." are
-    -- always done (they can be applied to specific elements or class names
-    -- with Styles tweaks.)
-
-    -- Trust role= and epub:type= attribute values if defined, for source(*) and target
-    flags = flags + 0x0004
-
-    -- Accept classic FB2 footnotes: body[name="notes" or "comments"] > section
-    flags = flags + 0x0008
-
-    -- TARGET STATUS AND SOURCE RELATION
-    -- Target must have an anchor #id (ie: must not be a simple link to a html file)
-    flags = flags + 0x0010
-    -- Target must come after source in the book
-    -- (Glossary definitions may point to others before, so avoid this check
-    -- if user wants more footnotes)
-    if not isPreferFootnoteEnabled() then
-        flags = flags + 0x0020
-    end
-    -- Target must not be a target of a TOC entry
-    flags = flags + 0x0040
-    -- flags = flags + 0x0080 -- Unused yet
-
-    -- SOURCE NODE CONTEXT
-    -- (*) Source link must not be empty content, and must not be the only content of
-    -- its parent block tag (this could mean it's a chapter title in an inline ToC)
-    flags = flags + 0x0100
-    -- (*) Source node vertical alignment:
-    -- check that all non-empty-nor-space-only children have their computed
-    -- vertical-align: any of: sub super top bottom (which will be the case
-    -- whether a parent or the childre themselves are in a <sub> or <sup>)
-    -- (Also checks if parent or children are <sub> or <sup>, which may
-    -- have been tweaked with CSS to not have one of these vertical-align.)
-    flags = flags + 0x0200
-    -- (*) Source node text (punctuation and parens stripped) is a number
-    -- (3 digits max, to avoid catching years ... but only years>1000)
-    flags = flags + 0x0400
-    -- (*) Source node text (punctuation and parens stripped) is 1 or 2 letters,
-    -- with 0 to 2 numbers (a, z, ab, 1a, B2)
-    flags = flags + 0x0800
-
-    -- TARGET NODE CONTEXT
-    -- Target must not contain, or be contained, in H1..H6
-    flags = flags + 0x1000
-    -- flags = flags + 0x2000 -- Unused yet
-    -- Try to extend footnote, to gather more text after target
-    flags = flags + 0x4000
-    -- Extended target readable text (not accounting HTML tags) must not be
-    -- larger than max_text_size
-    flags = flags + 0x8000
+    local flags = computeFootnoteDetectionFlags(trust_source_xpointer)
     local max_text_size = 10000 -- nb of chars
 
     local cache_key = source_xpointer .. "\0" .. target_xpointer .. "\0" .. tostring(flags)
@@ -1542,7 +1578,6 @@ function ReaderLink:showAsFootnotePopup(link, neglect_current_location)
         self.document:highlightXPointer(link.from_xpointer)
         -- Don't let a previous footnote popup clear our highlight
         self._footnote_popup_discard_previous_close_callback = true
-        UIManager:setDirty(self.dialog, "ui")
         close_callback = function(footnote_height)
             -- remove this highlight (actually all) on close
             local highlight_page = self.document:getCurrentPage()
@@ -1611,6 +1646,11 @@ function ReaderLink:showAsFootnotePopup(link, neglect_current_location)
         return false
     end
     UIManager:show(popup)
+    -- Refresh the full dialog area once for both the source link highlight
+    -- and the popup, instead of doing two separate refreshes.
+    if link.from_xpointer then
+        UIManager:setDirty(self.dialog, "ui")
+    end
     return true
 end
 

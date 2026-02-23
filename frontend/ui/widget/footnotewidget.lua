@@ -21,6 +21,79 @@ local Screen = Device.screen
 local T = require("ffi/util").template
 local time = require("ui/time")
 
+local _book_font_css_cache = {}
+local _fallback_paths_cache = nil
+local _fallback_paths_cache_key = nil
+
+local function _resolveFallbackPaths()
+    local user_fb = G_reader_settings:readSetting("fallback_font")
+    local cache_key = user_fb or ""
+    if _fallback_paths_cache and _fallback_paths_cache_key == cache_key then
+        return
+    end
+    local CreDocument = require("document/credocument")
+    local cre = CreDocument:engineInit()
+    local fallback_paths = {}
+    local seen_paths = {}
+    local fallback_names = {}
+    if user_fb then
+        table.insert(fallback_names, user_fb)
+    end
+    for _, name in ipairs(CreDocument.fallback_fonts) do
+        table.insert(fallback_names, name)
+    end
+    for _, name in ipairs(fallback_names) do
+        local path = cre.getFontFaceFilenameAndFaceIndex(name)
+        if path and not seen_paths[path] then
+            seen_paths[path] = true
+            table.insert(fallback_paths, path)
+        end
+    end
+    _fallback_paths_cache = fallback_paths
+    _fallback_paths_cache_key = cache_key
+end
+
+local function _resolveBookFontCss(doc_font_name)
+    if not doc_font_name then
+        return ""
+    end
+    if _book_font_css_cache[doc_font_name] then
+        return _book_font_css_cache[doc_font_name]
+    end
+    local cre = require("document/credocument"):engineInit()
+    local font_css = ""
+    -- Note: we can't provide any base weight (as supported by crengine), as MuPDF
+    -- will use the bold font for anything with a weight > 400. We can only use the
+    -- font as-is, without its natural weight tweaked.
+    local seen_font_path = {}
+    for i=1, 4 do
+        local bold = i >= 3
+        local italic = i == 2 or i ==4
+        -- We assume the font is not from a collection, and ignore the index.
+        local font_path = cre.getFontFaceFilenameAndFaceIndex(doc_font_name, bold, italic)
+        -- crengine returns the regular filename when requesting a bold that
+        -- it has synthesized; but MuPDF would consider it as real bold and
+        -- would use it as-is: by not providing the fake bold font file path,
+        -- we let MuPDF itself synthesize the bold (and also italic if none
+        -- provided). So, keep track of what's been seen and used.
+        if font_path and not seen_font_path[font_path] then
+            seen_font_path[font_path] = true
+            font_css = font_css .. T("\n@font-face { font-family: 'KOReaderFootnoteFont'; src: url('%1')%2%3}",
+                        font_path,
+                        bold and "; font-weight: bold" or "",
+                        italic and "; font-style: italic" or "")
+        end
+    end
+    if font_css ~= "" then
+        -- If not using our standard font, override "line-height:1.3" (which is fine
+        -- with Noto Sans) to use something smaller (looks like MuPDF's default is 1.2
+        -- and we can't make it use the font natural line height...)
+        font_css = font_css .. "\nbody { font-family: 'KOReaderFootnoteFont'; line-height: 1.2 !important; }\n"
+    end
+    _book_font_css_cache[doc_font_name] = font_css
+    return font_css
+end
+
 -- Note: we can't use < or > in comments in the CSS, or MuPDF complains with:
 --   error: css syntax error: unterminated comment.
 -- So, HTML tags in comments are written uppercase (eg: <li> => LI)
@@ -233,35 +306,7 @@ function FootnoteWidget:init()
 
     local font_css = ""
     if G_reader_settings:isTrue("footnote_popup_use_book_font") then
-        local cre = require("document/credocument"):engineInit()
-        -- Note: we can't provide any base weight (as supported by crengine), as MuPDF
-        -- will use the bold font for anything with a weight > 400. We can only use the
-        -- font as-is, without its natural weight tweaked.
-        local seen_font_path = {}
-        for i=1, 4 do
-            local bold = i >= 3
-            local italic = i == 2 or i ==4
-            -- We assume the font is not from a collection, and ignore the index.
-            local font_path = cre.getFontFaceFilenameAndFaceIndex(self.doc_font_name, bold, italic)
-            -- crengine returns the regular filename when requesting a bold that
-            -- it has synthesized; but MuPDF would consider it as real bold and
-            -- would use it as-is: by not providing the fake bold font file path,
-            -- we let MuPDF itself synthesize the bold (and also italic if none
-            -- provided). So, keep track of what's been seen and used.
-            if font_path and not seen_font_path[font_path] then
-                seen_font_path[font_path] = true
-                font_css = font_css .. T("\n@font-face { font-family: 'KOReaderFootnoteFont'; src: url('%1')%2%3}",
-                            font_path,
-                            bold and "; font-weight: bold" or "",
-                            italic and "; font-style: italic" or "")
-            end
-        end
-        if font_css ~= "" then
-            -- If not using our standard font, override "line-height:1.3" (which is fine
-            -- with Noto Sans) to use something smaller (looks like MuPDF's default is 1.2
-            -- and we can't make it use the font natural line height...)
-            font_css = font_css .. "\nbody { font-family: 'KOReaderFootnoteFont'; line-height: 1.2 !important; }\n"
-        end
+        font_css = _resolveBookFontCss(self.doc_font_name)
     end
 
     -- We want to display the footnote text with the same margins as
@@ -315,27 +360,9 @@ function FootnoteWidget:init()
     -- Wrapped in pcall: the C symbols may not exist if MuPDF was built
     -- without the user-fallback-fonts patch.
     pcall(function()
-        local CreDocument = require("document/credocument")
-        local cre = CreDocument:engineInit()
-        local fallback_paths = {}
-        local seen_paths = {}
-        local fallback_names = {}
-        local user_fb = G_reader_settings:readSetting("fallback_font")
-        if user_fb then
-            table.insert(fallback_names, user_fb)
-        end
-        for _, name in ipairs(CreDocument.fallback_fonts) do
-            table.insert(fallback_names, name)
-        end
-        for _, name in ipairs(fallback_names) do
-            local path = cre.getFontFaceFilenameAndFaceIndex(name)
-            if path and not seen_paths[path] then
-                seen_paths[path] = true
-                table.insert(fallback_paths, path)
-            end
-        end
-        if #fallback_paths > 0 then
-            require("ffi/mupdf").setUserFallbackFonts(fallback_paths)
+        _resolveFallbackPaths()
+        if _fallback_paths_cache and #_fallback_paths_cache > 0 then
+            require("ffi/mupdf").setUserFallbackFonts(_fallback_paths_cache)
         end
     end)
 
@@ -483,6 +510,20 @@ function FootnoteWidget:onSwipeFollow(arg, ges)
         -- so let it propagate
     end
     return false
+end
+
+--- Pre-resolve font caches in background so first popup open is faster.
+--- @param doc_font_name string|nil  Current document font face name.
+function FootnoteWidget.warmFontCaches(doc_font_name)
+    pcall(_resolveFallbackPaths)
+    if doc_font_name and G_reader_settings:isTrue("footnote_popup_use_book_font") then
+        pcall(_resolveBookFontCss, doc_font_name)
+    end
+end
+
+--- Invalidate book font CSS cache (e.g. after a font change).
+function FootnoteWidget.clearBookFontCssCache()
+    _book_font_css_cache = {}
 end
 
 return FootnoteWidget
