@@ -483,6 +483,36 @@ The recommended value is -2.]]),
 The footnote popup font adjusts to the font size you've set for the document.
 This allows you to specify how much smaller or larger it should be relative to the document font size.]]),
             },
+            {
+                text = _("Footnote popup height"),
+                enabled_func = function()
+                    return isFootnoteLinkInPopupEnabled() and
+                        (isTapToFollowLinksOn() or isSwipeToFollowNearestLinkEnabled())
+                end,
+                keep_menu_open = true,
+                callback = function()
+                    local SpinWidget = require("ui/widget/spinwidget")
+                    local spin_widget = SpinWidget:new{
+                        width = math.floor(Screen:getWidth() * 0.75),
+                        value = G_reader_settings:readSetting("footnote_popup_height_percent") or 33,
+                        value_min = 20,
+                        value_max = 80,
+                        precision = "%d%%",
+                        ok_text = _("Set height"),
+                        title_text = _("Set footnote popup height"),
+                        info_text = _([[
+The footnote popup height is specified as a percentage of screen height.
+The default is 33% (one third of the screen).]]),
+                        callback = function(spin)
+                            G_reader_settings:saveSetting("footnote_popup_height_percent", spin.value)
+                        end,
+                    }
+                    UIManager:show(spin_widget)
+                end,
+                help_text = _([[
+The footnote popup height is specified as a percentage of screen height.
+You can adjust it to show more or less content at once.]]),
+            },
         }
         return temp_menu_items
     end

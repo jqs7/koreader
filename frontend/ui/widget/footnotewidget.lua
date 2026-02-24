@@ -214,7 +214,8 @@ local FootnoteWidget = InputContainer:extend{
 function FootnoteWidget:init()
     -- Set widget size
     self.width = Screen:getWidth()
-    self.height = math.floor(Screen:getHeight() * 1/3) -- will be decreased when content is smaller
+    local height_percent = G_reader_settings:readSetting("footnote_popup_height_percent") or 33
+    self.height = math.floor(Screen:getHeight() * height_percent / 100) -- will be decreased when content is smaller
 
     if Device:isTouchDevice() then
         local range = Geom:new{
