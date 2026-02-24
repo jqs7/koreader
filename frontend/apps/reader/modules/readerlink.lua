@@ -361,8 +361,11 @@ function ReaderLink:getFootnoteSettingsMenuTable()
             end,
             checked_func = isFootnoteLinkInPopupEnabled,
             callback = function()
-                G_reader_settings:saveSetting("footnote_link_in_popup",
-                    not isFootnoteLinkInPopupEnabled())
+                local new_value = not isFootnoteLinkInPopupEnabled()
+                G_reader_settings:saveSetting("footnote_link_in_popup", new_value)
+                if new_value then
+                    self:_scheduleFootnoteCacheWarmup()
+                end
             end,
             help_text = _([[
 Show internal link target content in a footnote popup when it looks like it might be a footnote, instead of following the link.
@@ -386,6 +389,8 @@ From the footnote popup, you can jump to the footnote location in the book by sw
                 callback = function()
                     G_reader_settings:saveSetting("link_prefer_footnote",
                         not isPreferFootnoteEnabled())
+                    self:_footnoteCacheClear()
+                    self:_scheduleFootnoteCacheWarmup()
                 end,
                 help_text = _([[Loosen footnote detection rules to show more links as footnotes.]]),
                 separator = Device:isTouchDevice() and true or false,
@@ -401,6 +406,9 @@ From the footnote popup, you can jump to the footnote location in the book by sw
                 end,
                 callback = function()
                     G_reader_settings:flipNilOrFalse("footnote_popup_use_book_font")
+                    local FootnoteWidget = require("ui/widget/footnotewidget")
+                    FootnoteWidget.clearBookFontCssCache()
+                    self:_scheduleFootnoteCacheWarmup()
                 end,
                 help_text = _([[Display the footnote popup text with the configured document font (the book text may still render with a different font if the book uses embedded fonts).]]),
             },
@@ -1440,21 +1448,31 @@ function ReaderLink:_scheduleFootnoteCacheWarmup()
     if self.ui.paging or not isFootnoteLinkInPopupEnabled() then
         return
     end
+    -- Skip if warmup is already in progress
+    if self._footnote_warmup_in_progress then
+        return
+    end
     self:_cancelFootnoteCacheWarmup()
     self._footnote_warmup_action = function()
         self._footnote_warmup_action = nil
         self:_warmFootnoteCacheForPage()
     end
     -- Delay warmup to avoid interfering with rapid page turns
-    UIManager:scheduleIn(1, self._footnote_warmup_action)
+    UIManager:scheduleIn(0.3, self._footnote_warmup_action)
 end
 
 function ReaderLink:_warmFootnoteCacheForPage()
     if self.ui.paging then
         return
     end
+    -- Prevent concurrent warmup
+    if self._footnote_warmup_in_progress then
+        return
+    end
+    self._footnote_warmup_in_progress = true
     local links = self.document:getPageLinks(true)
     if not links or #links == 0 then
+        self._footnote_warmup_in_progress = nil
         return
     end
     local max_text_size = 10000
@@ -1466,21 +1484,31 @@ function ReaderLink:_warmFootnoteCacheForPage()
             local target_xp = link.section
             local flags = source_xp and flags_trusted or flags_untrusted
             local cache_key = (source_xp or "") .. "\0" .. target_xp .. "\0" .. tostring(flags)
-            if not (self._footnote_cache and self._footnote_cache[cache_key]) then
-                local is_footnote, _reason, _extStopReason, extStartXP, extEndXP =
-                        self.document:isLinkToFootnote(source_xp or target_xp, target_xp, flags, max_text_size)
+            if not self._footnote_cache or not self._footnote_cache[cache_key] then
+                local ok, is_footnote, _reason, _extStopReason, extStartXP, extEndXP =
+                        pcall(self.document.isLinkToFootnote, self.document, source_xp or target_xp, target_xp, flags, max_text_size)
+                if not ok then
+                    -- Skip this link if detection fails
+                    goto continue
+                end
                 local html
                 if is_footnote then
                     if extStartXP and extEndXP then
-                        html = self.document:getHTMLFromXPointers(extStartXP, extEndXP, 0x1001)
+                        ok, html = pcall(self.document.getHTMLFromXPointers, self.document, extStartXP, extEndXP, 0x1001)
                     else
-                        html = self.document:getHTMLFromXPointer(target_xp, 0x1001, true)
+                        ok, html = pcall(self.document.getHTMLFromXPointer, self.document, target_xp, 0x1001, true)
+                    end
+                    if not ok then
+                        -- Failed to get HTML, skip caching this link
+                        goto continue
                     end
                 end
                 self:_footnoteCachePut(cache_key, { is_footnote = is_footnote, html = html })
+                ::continue::
             end
         end
     end
+    self._footnote_warmup_in_progress = nil
 end
 
 function ReaderLink:onGoToLatestBookmark(ges)
