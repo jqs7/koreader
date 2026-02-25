@@ -380,7 +380,7 @@ function ImageViewer:update()
     --       while a long touch will trigger a dithered, flashing full-refresh that'll make everything shiny :).
     self.dithered = true
     UIManager:setDirty(self, function()
-        local update_region = self.main_frame.dimen:combine(orig_dimen)
+        local update_region = orig_dimen and self.main_frame.dimen:combine(orig_dimen) or self.main_frame.dimen
         return wfm_mode, update_region, true
     end)
 end
