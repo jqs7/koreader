@@ -115,6 +115,40 @@ check_submodules() {
     fi
 }
 
+# Rust toolchain check and installation
+ensure_rust() {
+    # Check if Rust is installed
+    if ! command -v rustc &>/dev/null || ! command -v cargo &>/dev/null; then
+        info "Rust not found. Installing via rustup..."
+        
+        # Install rustup
+        if ! command -v rustup &>/dev/null; then
+            info "Installing rustup..."
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            # Source cargo environment
+            if [[ -f "${HOME}/.cargo/env" ]]; then
+                source "${HOME}/.cargo/env"
+            fi
+        else
+            info "rustup found, installing stable toolchain..."
+            rustup default stable
+        fi
+        
+        # Verify installation
+        if ! command -v rustc &>/dev/null || ! command -v cargo &>/dev/null; then
+            err "ERROR: Rust installation failed. Please install manually from https://rustup.rs/"
+            exit 1
+        fi
+        
+        info "Rust installed successfully:"
+        rustc --version
+        cargo --version
+    fi
+    
+    # Set CARGO_HOME if not set (ensures target-dir works correctly)
+    export CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
+}
+
 show_help() {
     local help="${HELP}"
     help="${help#"${help%%[![:space:]]*}"}"
@@ -383,6 +417,8 @@ ${RELEASE_TARGETS_HELP_MSG}
                 ;;
         esac
     done
+    # Ensure Rust is installed before building
+    ensure_rust
     setup_target "${ARGS[0]}"
     if [[ "${ignore_translation}" -eq 0 ]]; then
         if ! TARGET='' run_make po; then
@@ -576,6 +612,10 @@ ANDROID TARGET:
     if [[ "$1" = android-* ]]; then
         target="$1"
         shift
+    fi
+    # Ensure Rust is installed before building (unless using --no-build)
+    if [[ -z "${NO_BUILD}" ]]; then
+        ensure_rust
     fi
     setup_target "${target}"
     # Build command prefix.
