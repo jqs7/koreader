@@ -373,7 +373,7 @@ Show internal link target content in a footnote popup when it looks like it migh
 Note that depending on the book quality, footnote detection may not always work correctly.
 The footnote content may be empty, truncated, or include other footnotes.
 
-From the footnote popup, you can jump to the footnote location in the book by swiping to the left.]]),
+From the footnote popup, you can jump to the footnote location in the book by tapping the "Go to footnote" link at the bottom-left corner, or close it by swiping left, right, or down.]]),
         },
     }
 
@@ -1717,7 +1717,7 @@ function ReaderLink:addToExternalLinkDialog(idx, fn_button)
     self._external_link_buttons[idx] = fn_button
 end
 
-local FOOTNOTE_CACHE_MAX = 32
+local FOOTNOTE_CACHE_MAX = 5
 
 function ReaderLink:_footnoteCachePut(key, value)
     if not self._footnote_cache then
