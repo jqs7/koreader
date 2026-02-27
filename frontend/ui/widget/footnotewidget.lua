@@ -4,6 +4,7 @@ local BottomContainer = require("ui/widget/container/bottomcontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Device = require("device")
 local Event = require("ui/event")
+local Font = require("ui/font")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
@@ -13,6 +14,7 @@ local InputContainer = require("ui/widget/container/inputcontainer")
 local LineWidget = require("ui/widget/linewidget")
 local ScrollHtmlWidget = require("ui/widget/scrollhtmlwidget")
 local Size = require("ui/size")
+local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
@@ -433,7 +435,47 @@ function FootnoteWidget:init()
 
     -- We only want a top border, so use a LineWidget for that
     local top_border_size = Size.line.thick
-    local vgroup = VerticalGroup:new{
+    
+    -- Create "Go to footnote" link button at bottom-left
+    local goto_link
+    local goto_link_height = 0
+    if self.follow_callback then
+        local link_text = _("Go to footnote")
+        -- Use the smallest available font
+        local link_face = Font:getFace("infofont", 14)  -- Very small fixed size
+        local link_widget = TextWidget:new{
+            text = link_text,
+            face = link_face,
+            fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+        }
+        -- Make it tappable with absolute minimal padding
+        goto_link = FrameContainer:new{
+            padding = 1,  -- Minimal 1px padding
+            margin = 0,
+            bordersize = 0,
+            background = Blitbuffer.COLOR_WHITE,
+            InputContainer:new{
+                ges_events = {
+                    TapGotoFootnote = {
+                        GestureRange:new{
+                            ges = "tap",
+                            range = function() return goto_link.dimen end,
+                        }
+                    },
+                },
+                onTapGotoFootnote = function()
+                    if self.close_callback then
+                        self.close_callback(self.height)
+                    end
+                    return self.follow_callback()
+                end,
+                link_widget,
+            }
+        }
+        goto_link_height = link_widget:getSize().h + 2  -- 1px padding * 2
+    end
+    
+    local vgroup_children = {
         LineWidget:new{
             dimen = Geom:new{
                 w = self.width,
@@ -447,6 +489,8 @@ function FootnoteWidget:init()
         },
         VerticalSpan:new{ width = padding_bottom },
     }
+    
+    local vgroup = VerticalGroup:new(vgroup_children)
 
     -- If htmlwidget contains only one page (small footnote content),
     -- display only the valuable area: push the blank area down the screen
@@ -458,6 +502,7 @@ function FootnoteWidget:init()
         -- Add a bit to bottom padding, as getSinglePageHeight() cut can be rough
         -- added_bottom_pad = math.floor(font_size * 0.2)
         local reduced_height = single_page_height + top_border_size + padding_top + padding_bottom + added_bottom_pad
+        -- Use CenterContainer to push content to bottom and achieve auto-compression
         vgroup = CenterContainer:new{
             dimen = Geom:new{
                 h = reduced_height,
@@ -467,6 +512,36 @@ function FootnoteWidget:init()
             vgroup,
         }
         self.height = reduced_height -- for close_callback
+        -- Add goto_link height after compression
+        if goto_link then
+            self.height = self.height + goto_link_height + 2
+        end
+    else
+        -- For multi-page footnotes, update height to include link
+        if goto_link then
+            self.height = self.height + goto_link_height + 2
+        end
+    end
+    
+    -- Add goto_link at the bottom, outside of CenterContainer
+    -- so it won't be affected by auto-compression
+    if goto_link then
+        -- Calculate the width needed to fill the rest of the line
+        -- Use a smaller left margin to make the button more to the left
+        local link_left_margin = math.floor(self.doc_margins.left / 2)
+        local link_width = goto_link:getSize().w
+        local remaining_width = self.width - link_left_margin - link_width - self.doc_margins.right
+        
+        -- Wrap vgroup and goto_link in a new VerticalGroup
+        vgroup = VerticalGroup:new{
+            vgroup,
+            HorizontalGroup:new{
+                HorizontalSpan:new{ width = link_left_margin },
+                goto_link,
+                HorizontalSpan:new{ width = remaining_width },
+            },
+            VerticalSpan:new{ width = 2 },
+        }
     end
 
     -- Needed only to set a white background
@@ -475,6 +550,10 @@ function FootnoteWidget:init()
         bordersize = 0,
         margin = 0,
         padding = 0,
+        dimen = Geom:new{
+            w = self.width,
+            h = self.height,
+        },
         vgroup,
     }
 
@@ -532,20 +611,11 @@ end
 
 function FootnoteWidget:onSwipeFollow(arg, ges)
     local direction = BD.flipDirectionIfMirroredUILayout(ges.direction)
-    if direction == "west" then
-        if self.follow_callback then
-            if self.close_callback then
-                self.close_callback(self.height)
-            end
-            return self.follow_callback()
-        end
-    elseif direction == "south" or direction == "east" then
+    if direction == "west" or direction == "south" or direction == "east" then
         UIManager:close(self)
-        -- We can close with swipe down. If footnote is scrollable,
+        -- We can close with swipe left, down, or right. If footnote is scrollable,
         -- this event will be eaten by ScrollHtmlWidget, and it will
         -- work only when started outside the footnote.
-        -- Also allow closing with swipe east (like we do to go back
-        -- from link)
         if self.close_callback then
             self.close_callback(self.height)
         end
