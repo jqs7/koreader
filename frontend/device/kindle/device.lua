@@ -1381,20 +1381,17 @@ function KindlePaperWhite3:init()
 end
 
 -- HAL for gyro orientation switches (EV_ABS:ABS_PRESSURE (?!) w/ custom values to EV_MSC:MSC_GYRO w/ our own custom values)
+-- NOTE: KOA1's kernel driver reports detailed orientation states including tilt angles (15-20 for portrait variants).
+-- To avoid overly sensitive rotation when gyro is locked, we only respond to "centered" orientations (19, 20, 21, 22).
+-- This prevents frequent UR<->UD switches caused by minor tilts when the device is held at slight angles.
 local function OasisGyroTranslation(this, ev)
-    local DEVICE_ORIENTATION_PORTRAIT_LEFT          = 15
-    local DEVICE_ORIENTATION_PORTRAIT_RIGHT         = 17
-    local DEVICE_ORIENTATION_PORTRAIT               = 19
-    local DEVICE_ORIENTATION_PORTRAIT_ROTATED_LEFT  = 16
-    local DEVICE_ORIENTATION_PORTRAIT_ROTATED_RIGHT = 18
-    local DEVICE_ORIENTATION_PORTRAIT_ROTATED       = 20
-    local DEVICE_ORIENTATION_LANDSCAPE              = 21
-    local DEVICE_ORIENTATION_LANDSCAPE_ROTATED      = 22
+    local DEVICE_ORIENTATION_PORTRAIT               = 19  -- Portrait centered (upright)
+    local DEVICE_ORIENTATION_PORTRAIT_ROTATED       = 20  -- Portrait rotated centered (upside down)
+    local DEVICE_ORIENTATION_LANDSCAPE              = 21  -- Landscape centered (clockwise)
+    local DEVICE_ORIENTATION_LANDSCAPE_ROTATED      = 22  -- Landscape rotated centered (counter-clockwise)
 
     if ev.type == C.EV_ABS and ev.code == C.ABS_PRESSURE then
-        if ev.value == DEVICE_ORIENTATION_PORTRAIT
-            or ev.value == DEVICE_ORIENTATION_PORTRAIT_LEFT
-            or ev.value == DEVICE_ORIENTATION_PORTRAIT_RIGHT then
+        if ev.value == DEVICE_ORIENTATION_PORTRAIT then
             -- i.e., UR
             ev.type = C.EV_MSC
             ev.code = C.MSC_GYRO
@@ -1404,9 +1401,7 @@ local function OasisGyroTranslation(this, ev)
             ev.type = C.EV_MSC
             ev.code = C.MSC_GYRO
             ev.value = C.DEVICE_ROTATED_CLOCKWISE
-        elseif ev.value == DEVICE_ORIENTATION_PORTRAIT_ROTATED
-            or ev.value == DEVICE_ORIENTATION_PORTRAIT_ROTATED_LEFT
-            or ev.value == DEVICE_ORIENTATION_PORTRAIT_ROTATED_RIGHT then
+        elseif ev.value == DEVICE_ORIENTATION_PORTRAIT_ROTATED then
             -- i.e., UD
             ev.type = C.EV_MSC
             ev.code = C.MSC_GYRO
