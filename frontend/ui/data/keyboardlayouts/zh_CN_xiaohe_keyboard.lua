@@ -1,5 +1,6 @@
 local IME = require("ui/data/keyboardlayouts/generic_ime")
 local util = require("util")
+local Utf8Proc = require("ffi/utf8proc")
 local _ = require("gettext")
 
 -- Start with the english keyboard layout
@@ -15,7 +16,7 @@ local function mostlySingleCandidates(candi)
     local sample_count = math.min(#candi, 20)
     local single_char_count = 0
     for i = 1, sample_count do
-        if utf8.len(candi[i] or "") == 1 then
+        if select(1, Utf8Proc.count(candi[i] or "")) == 1 then
             single_char_count = single_char_count + 1
         end
     end
