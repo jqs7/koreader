@@ -124,13 +124,11 @@ function ReaderLink:init()
             self:addCurrentLocationToStack()
         end)
     end
-    -- Pre-warm font caches and footnote detection in background after
-    -- the reader is ready, so the first footnote popup opens faster.
-    -- The actual guard (document type + setting check) is inside
-    -- _warmFootnotePopupCaches; we always register here because
-    -- settings migration (lines below) hasn't run yet at this point.
-    self.ui:registerPostReaderReadyCallback(function()
-        UIManager:nextTick(function()
+    -- Pre-warm font caches and footnote detection right after initial
+    -- document setup, before ReaderReady. Keep a short delay to avoid
+    -- competing with first paint on slower devices.
+    self.ui:registerPostInitCallback(function()
+        UIManager:scheduleIn(0.1, function()
             self:_warmFootnotePopupCaches()
         end)
     end)
@@ -1449,6 +1447,7 @@ function ReaderLink:onPosUpdate()
 end
 
 function ReaderLink:onDocumentRerendered()
+    self:_cancelFootnoteCacheWarmup()
     self:_footnoteCacheClear()
     -- Font may have changed; invalidate book font CSS and re-warm.
     local FootnoteWidget = require("ui/widget/footnotewidget")
@@ -1458,10 +1457,15 @@ function ReaderLink:onDocumentRerendered()
     end)
 end
 
+function ReaderLink:_canWarmFootnotePopupCaches()
+    return self.ui.rolling and not self.ui.paging and isFootnoteLinkInPopupEnabled()
+end
+
 function ReaderLink:_warmFootnotePopupCaches()
-    if self.ui.paging or not isFootnoteLinkInPopupEnabled() then
+    if not self:_canWarmFootnotePopupCaches() then
         return
     end
+    self:_cancelFootnoteCacheWarmup()
     local FootnoteWidget = require("ui/widget/footnotewidget")
     FootnoteWidget.warmFontCaches(self.ui.font and self.ui.font.font_face)
     self:_warmFootnoteCacheForPage()
@@ -1472,17 +1476,91 @@ function ReaderLink:_cancelFootnoteCacheWarmup()
         UIManager:unschedule(self._footnote_warmup_action)
         self._footnote_warmup_action = nil
     end
+    self._footnote_warmup_cancelled = true
+    self._footnote_warmup_links = nil
+    self._footnote_warmup_next_index = nil
+    self._footnote_warmup_in_progress = nil
+end
+
+function ReaderLink:_finishFootnoteCacheWarmup()
+    self._footnote_warmup_action = nil
+    self._footnote_warmup_links = nil
+    self._footnote_warmup_next_index = nil
+    self._footnote_warmup_in_progress = nil
+    self._footnote_warmup_cancelled = nil
+end
+
+function ReaderLink:_warmFootnoteCacheLink(link, max_text_size, flags_trusted, flags_untrusted)
+    if not link.section then
+        return
+    end
+    local source_xp = link.a_xpointer
+    local target_xp = link.section
+    local flags = source_xp and flags_trusted or flags_untrusted
+    local cache_key = (source_xp or "") .. "\0" .. target_xp .. "\0" .. tostring(flags)
+    if self._footnote_cache and self._footnote_cache[cache_key] then
+        return
+    end
+    local ok, is_footnote, _reason, _extStopReason, extStartXP, extEndXP =
+            pcall(self.document.isLinkToFootnote, self.document, source_xp or target_xp, target_xp, flags, max_text_size)
+    if not ok then
+        return
+    end
+    local html
+    if is_footnote then
+        if extStartXP and extEndXP then
+            ok, html = pcall(self.document.getHTMLFromXPointers, self.document, extStartXP, extEndXP, 0x1001)
+        else
+            ok, html = pcall(self.document.getHTMLFromXPointer, self.document, target_xp, 0x1001, true)
+        end
+        if not ok then
+            return
+        end
+    end
+    self:_footnoteCachePut(cache_key, { is_footnote = is_footnote, html = html })
+end
+
+local FOOTNOTE_WARMUP_BATCH_SIZE = 3
+local FOOTNOTE_WARMUP_BATCH_DELAY_S = 0.01
+
+function ReaderLink:_warmFootnoteCacheBatch()
+    if not self:_canWarmFootnotePopupCaches() or self._footnote_warmup_cancelled then
+        self:_finishFootnoteCacheWarmup()
+        return
+    end
+    local links = self._footnote_warmup_links
+    local index = self._footnote_warmup_next_index or 1
+    if not links or index > #links then
+        self:_finishFootnoteCacheWarmup()
+        return
+    end
+    local max_text_size = 10000
+    local flags_trusted = computeFootnoteDetectionFlags(true)
+    local flags_untrusted = computeFootnoteDetectionFlags(false)
+    local processed = 0
+    while index <= #links and processed < FOOTNOTE_WARMUP_BATCH_SIZE do
+        self:_warmFootnoteCacheLink(links[index], max_text_size, flags_trusted, flags_untrusted)
+        index = index + 1
+        processed = processed + 1
+    end
+    if index > #links then
+        self:_finishFootnoteCacheWarmup()
+        return
+    end
+    self._footnote_warmup_next_index = index
+    self._footnote_warmup_action = function()
+        self._footnote_warmup_action = nil
+        self:_warmFootnoteCacheBatch()
+    end
+    UIManager:scheduleIn(FOOTNOTE_WARMUP_BATCH_DELAY_S, self._footnote_warmup_action)
 end
 
 function ReaderLink:_scheduleFootnoteCacheWarmup()
-    if self.ui.paging or not isFootnoteLinkInPopupEnabled() then
-        return
-    end
-    -- Skip if warmup is already in progress
-    if self._footnote_warmup_in_progress then
+    if not self:_canWarmFootnotePopupCaches() then
         return
     end
     self:_cancelFootnoteCacheWarmup()
+    self._footnote_warmup_cancelled = nil
     self._footnote_warmup_action = function()
         self._footnote_warmup_action = nil
         self:_warmFootnoteCacheForPage()
@@ -1492,7 +1570,7 @@ function ReaderLink:_scheduleFootnoteCacheWarmup()
 end
 
 function ReaderLink:_warmFootnoteCacheForPage()
-    if self.ui.paging then
+    if not self:_canWarmFootnotePopupCaches() then
         return
     end
     -- Prevent concurrent warmup
@@ -1500,45 +1578,15 @@ function ReaderLink:_warmFootnoteCacheForPage()
         return
     end
     self._footnote_warmup_in_progress = true
+    self._footnote_warmup_cancelled = nil
     local links = self.document:getPageLinks(true)
     if not links or #links == 0 then
-        self._footnote_warmup_in_progress = nil
+        self:_finishFootnoteCacheWarmup()
         return
     end
-    local max_text_size = 10000
-    local flags_trusted = computeFootnoteDetectionFlags(true)
-    local flags_untrusted = computeFootnoteDetectionFlags(false)
-    for _, link in ipairs(links) do
-        if link.section then
-            local source_xp = link.a_xpointer
-            local target_xp = link.section
-            local flags = source_xp and flags_trusted or flags_untrusted
-            local cache_key = (source_xp or "") .. "\0" .. target_xp .. "\0" .. tostring(flags)
-            if not self._footnote_cache or not self._footnote_cache[cache_key] then
-                local ok, is_footnote, _reason, _extStopReason, extStartXP, extEndXP =
-                        pcall(self.document.isLinkToFootnote, self.document, source_xp or target_xp, target_xp, flags, max_text_size)
-                if not ok then
-                    -- Skip this link if detection fails
-                    goto continue
-                end
-                local html
-                if is_footnote then
-                    if extStartXP and extEndXP then
-                        ok, html = pcall(self.document.getHTMLFromXPointers, self.document, extStartXP, extEndXP, 0x1001)
-                    else
-                        ok, html = pcall(self.document.getHTMLFromXPointer, self.document, target_xp, 0x1001, true)
-                    end
-                    if not ok then
-                        -- Failed to get HTML, skip caching this link
-                        goto continue
-                    end
-                end
-                self:_footnoteCachePut(cache_key, { is_footnote = is_footnote, html = html })
-                ::continue::
-            end
-        end
-    end
-    self._footnote_warmup_in_progress = nil
+    self._footnote_warmup_links = links
+    self._footnote_warmup_next_index = 1
+    self:_warmFootnoteCacheBatch()
 end
 
 function ReaderLink:onGoToLatestBookmark(ges)
