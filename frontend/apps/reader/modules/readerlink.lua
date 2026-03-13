@@ -1479,6 +1479,10 @@ function ReaderLink:_cancelFootnoteCacheWarmup()
     self._footnote_warmup_cancelled = true
     self._footnote_warmup_links = nil
     self._footnote_warmup_next_index = nil
+    self._footnote_warmup_stats = nil
+    self._footnote_warmup_max_text_size = nil
+    self._footnote_warmup_flags_trusted = nil
+    self._footnote_warmup_flags_untrusted = nil
     self._footnote_warmup_in_progress = nil
 end
 
@@ -1486,6 +1490,10 @@ function ReaderLink:_finishFootnoteCacheWarmup()
     self._footnote_warmup_action = nil
     self._footnote_warmup_links = nil
     self._footnote_warmup_next_index = nil
+    self._footnote_warmup_stats = nil
+    self._footnote_warmup_max_text_size = nil
+    self._footnote_warmup_flags_trusted = nil
+    self._footnote_warmup_flags_untrusted = nil
     self._footnote_warmup_in_progress = nil
     self._footnote_warmup_cancelled = nil
 end
@@ -1522,6 +1530,80 @@ end
 
 local FOOTNOTE_WARMUP_BATCH_SIZE = 3
 local FOOTNOTE_WARMUP_BATCH_DELAY_S = 0.01
+local FOOTNOTE_WARMUP_VISIBLE_MARGIN_DP = 20
+
+function ReaderLink:_getFootnoteWarmupLinkY(link)
+    if link.segments and #link.segments > 0 then
+        local segment = link.segments[#link.segments]
+        if segment.y1 then
+            return segment.y1
+        end
+        return segment.y0
+    end
+    if link.end_y then
+        return link.end_y
+    end
+    return link.start_y
+end
+
+function ReaderLink:_getPrioritizedFootnoteWarmupLinks(links)
+    local screen_h = Screen:getHeight()
+    local margin = Screen:scaleBySize(FOOTNOTE_WARMUP_VISIBLE_MARGIN_DP)
+    local near_visible = {}
+    local after_visible = {}
+    local before_visible = {}
+    local unknown = {}
+    for idx, link in ipairs(links) do
+        local y = self:_getFootnoteWarmupLinkY(link)
+        if y == nil then
+            table.insert(unknown, { idx = idx, link = link })
+        elseif y > screen_h + margin then
+            table.insert(after_visible, { idx = idx, y = y, link = link })
+        elseif y < -margin then
+            table.insert(before_visible, { idx = idx, y = y, link = link })
+        else
+            table.insert(near_visible, { idx = idx, y = y, link = link })
+        end
+    end
+    table.sort(near_visible, function(a, b)
+        if a.y == b.y then
+            return a.idx < b.idx
+        end
+        return a.y < b.y
+    end)
+    table.sort(after_visible, function(a, b)
+        if a.y == b.y then
+            return a.idx < b.idx
+        end
+        return a.y < b.y
+    end)
+    -- "Before visible" should prioritize links nearest to the viewport top.
+    table.sort(before_visible, function(a, b)
+        if a.y == b.y then
+            return a.idx < b.idx
+        end
+        return a.y > b.y
+    end)
+    local prioritized = {}
+    for _, item in ipairs(near_visible) do
+        table.insert(prioritized, item.link)
+    end
+    for _, item in ipairs(after_visible) do
+        table.insert(prioritized, item.link)
+    end
+    for _, item in ipairs(before_visible) do
+        table.insert(prioritized, item.link)
+    end
+    for _, item in ipairs(unknown) do
+        table.insert(prioritized, item.link)
+    end
+    return prioritized, {
+        near_visible = #near_visible,
+        after_visible = #after_visible,
+        before_visible = #before_visible,
+        unknown = #unknown,
+    }
+end
 
 function ReaderLink:_warmFootnoteCacheBatch()
     if not self:_canWarmFootnotePopupCaches() or self._footnote_warmup_cancelled then
@@ -1534,9 +1616,13 @@ function ReaderLink:_warmFootnoteCacheBatch()
         self:_finishFootnoteCacheWarmup()
         return
     end
-    local max_text_size = 10000
-    local flags_trusted = computeFootnoteDetectionFlags(true)
-    local flags_untrusted = computeFootnoteDetectionFlags(false)
+    local max_text_size = self._footnote_warmup_max_text_size or 10000
+    local flags_trusted = self._footnote_warmup_flags_trusted
+    local flags_untrusted = self._footnote_warmup_flags_untrusted
+    if flags_trusted == nil or flags_untrusted == nil then
+        flags_trusted = computeFootnoteDetectionFlags(true)
+        flags_untrusted = computeFootnoteDetectionFlags(false)
+    end
     local processed = 0
     while index <= #links and processed < FOOTNOTE_WARMUP_BATCH_SIZE do
         self:_warmFootnoteCacheLink(links[index], max_text_size, flags_trusted, flags_untrusted)
@@ -1584,7 +1670,16 @@ function ReaderLink:_warmFootnoteCacheForPage()
         self:_finishFootnoteCacheWarmup()
         return
     end
-    self._footnote_warmup_links = links
+    self._footnote_warmup_links, self._footnote_warmup_stats =
+            self:_getPrioritizedFootnoteWarmupLinks(links)
+    self._footnote_warmup_max_text_size = 10000
+    self._footnote_warmup_flags_trusted = computeFootnoteDetectionFlags(true)
+    self._footnote_warmup_flags_untrusted = computeFootnoteDetectionFlags(false)
+    logger.dbg("Footnote warmup priority near/after/before/unknown:",
+            self._footnote_warmup_stats.near_visible,
+            self._footnote_warmup_stats.after_visible,
+            self._footnote_warmup_stats.before_visible,
+            self._footnote_warmup_stats.unknown)
     self._footnote_warmup_next_index = 1
     self:_warmFootnoteCacheBatch()
 end
@@ -1765,7 +1860,7 @@ function ReaderLink:addToExternalLinkDialog(idx, fn_button)
     self._external_link_buttons[idx] = fn_button
 end
 
-local FOOTNOTE_CACHE_MAX = 5
+local FOOTNOTE_CACHE_MAX = 30
 
 function ReaderLink:_footnoteCachePut(key, value)
     if not self._footnote_cache then
