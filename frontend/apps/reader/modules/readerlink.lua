@@ -305,6 +305,10 @@ local function isFootnoteLinkInPopupEnabled()
     return G_reader_settings:isTrue("footnote_link_in_popup")
 end
 
+local function isTapLinkHighlightEnabled()
+    return G_reader_settings:nilOrTrue("tap_link_highlight")
+end
+
 local function isPreferFootnoteEnabled()
     return G_reader_settings:isTrue("link_prefer_footnote")
 end
@@ -372,6 +376,18 @@ Note that depending on the book quality, footnote detection may not always work 
 The footnote content may be empty, truncated, or include other footnotes.
 
 From the footnote popup, you can jump to the footnote location in the book by tapping the "Go to footnote" link at the bottom-left corner, or close it by swiping left, right, or down.]]),
+        },
+        {
+            text = _("Highlight tapped links"),
+            enabled_func = function()
+                return isFootnoteLinkInPopupEnabled() and isTapToFollowLinksOn()
+            end,
+            checked_func = isTapLinkHighlightEnabled,
+            callback = function()
+                G_reader_settings:saveSetting("tap_link_highlight",
+                    not isTapLinkHighlightEnabled())
+            end,
+            help_text = _([[Highlight the tapped source link while a footnote popup is shown.]]),
         },
     }
 
@@ -1775,7 +1791,8 @@ function ReaderLink:showAsFootnotePopup(link, neglect_current_location)
     -- As we stay on the current page, we can highlight the selected link
     -- (which might not be seen when covered by FootnoteWidget)
     local close_callback = nil
-    if link.from_xpointer then -- coherent xpointer
+    local should_highlight_tapped_link = link.from_xpointer and isTapLinkHighlightEnabled()
+    if should_highlight_tapped_link then -- coherent xpointer
         self.document:highlightXPointer() -- clear any previous one
         self.document:highlightXPointer(link.from_xpointer)
         -- Don't let a previous footnote popup clear our highlight
@@ -1850,7 +1867,7 @@ function ReaderLink:showAsFootnotePopup(link, neglect_current_location)
     UIManager:show(popup)
     -- Refresh the full dialog area once for both the source link highlight
     -- and the popup, instead of doing two separate refreshes.
-    if link.from_xpointer then
+    if should_highlight_tapped_link then
         UIManager:setDirty(self.dialog, "ui")
     end
     return true
